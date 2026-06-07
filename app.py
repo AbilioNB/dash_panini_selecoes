@@ -300,7 +300,11 @@ try:
             return ''
 
         colunas_figurinhas = [str(i) for i in range(1, 21) if str(i) in df_tabela.columns]
-        df_estilizado = df_tabela.style.applymap(colorir_valor, subset=colunas_figurinhas)
+        styler = df_tabela.style
+        if hasattr(styler, "map"):
+            df_estilizado = styler.map(colorir_valor, subset=colunas_figurinhas)
+        else:
+            df_estilizado = styler.applymap(colorir_valor, subset=colunas_figurinhas)
         st.dataframe(df_estilizado, use_container_width=True, hide_index=True)
 
         st.divider()
