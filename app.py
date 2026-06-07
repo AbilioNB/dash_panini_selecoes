@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import sqlite3
+from pathlib import Path
+from datetime import datetime
 
 # Configuração da página
 st.set_page_config(page_title="Dashboard - Seleções", layout="wide", page_icon="⚽")
@@ -16,16 +19,96 @@ def get_google_sheet_csv_url(url):
     return url
 
 
+def carregar_dados(sheet_url):
+    csv_url = get_google_sheet_csv_url(sheet_url)
+    df_local = pd.read_csv(csv_url)
+
+    df_local = df_local.dropna(subset=['SELECOES'])
+    df_local['SELECOES'] = df_local['SELECOES'].astype(str).str.strip()
+    df_local['GRUPO'] = df_local['GRUPO'].astype(str).str.strip()
+
+    return df_local
+
+
+def recalcular_totais(df_local):
+    colunas_figurinhas = [str(i) for i in range(1, 21) if str(i) in df_local.columns]
+
+    if colunas_figurinhas:
+        df_local['TOTAL'] = df_local[colunas_figurinhas].sum(axis=1)
+        df_local['FALTANTE'] = len(colunas_figurinhas) - df_local['TOTAL']
+
+    return df_local
+
+
+def get_banco_path():
+    return Path(__file__).with_name("dados.sqlite")
+
+
+def carregar_dados_locais(sheet_url):
+    banco_path = get_banco_path()
+
+    if banco_path.exists():
+        with sqlite3.connect(banco_path) as conexao:
+            df_local = pd.read_sql_query("SELECT * FROM selecoes", conexao)
+    else:
+        df_local = carregar_dados(sheet_url)
+        df_local = recalcular_totais(df_local)
+        with sqlite3.connect(banco_path) as conexao:
+            df_local.to_sql("selecoes", conexao, if_exists="replace", index=False)
+            pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"]).to_sql(
+                "aquisicoes", conexao, if_exists="replace", index=False
+            )
+
+    df_local = df_local.fillna(0)
+    return recalcular_totais(df_local)
+
+
+def salvar_dados_locais(df_local):
+    banco_path = get_banco_path()
+    with sqlite3.connect(banco_path) as conexao:
+        df_local.to_sql("selecoes", conexao, if_exists="replace", index=False)
+
+
+def registrar_aquisicao_no_historico(selecao, numero):
+    banco_path = get_banco_path()
+    historico = pd.DataFrame([
+        {
+            "DATA_HORA": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "SELECAO": selecao,
+            "NUMERO": numero,
+        }
+    ])
+
+    with sqlite3.connect(banco_path) as conexao:
+        historico.to_sql("aquisicoes", conexao, if_exists="append", index=False)
+
+
+def carregar_historico_aquisicoes():
+    banco_path = get_banco_path()
+    if not banco_path.exists():
+        return pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"])
+
+    with sqlite3.connect(banco_path) as conexao:
+        try:
+            return pd.read_sql_query("SELECT DATA_HORA, SELECAO, NUMERO FROM aquisicoes ORDER BY DATA_HORA DESC", conexao)
+        except Exception:
+            return pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"])
+
+
 sheet_url = "https://docs.google.com/spreadsheets/d/1RKQgjvb2QImzO8cAhVtARSKNdJrdH22b1KNqqiqFAZw/edit?usp=sharing"
 
 try:
-    csv_url = get_google_sheet_csv_url(sheet_url)
-    df = pd.read_csv(csv_url)
-    
-    # --- CORREÇÃO E LIMPEZA DE DADOS ---
-    df = df.dropna(subset=['SELECOES'])
-    df['SELECOES'] = df['SELECOES'].str.strip()
-    df['GRUPO'] = df['GRUPO'].str.strip()
+    if 'df_base' not in st.session_state:
+        st.session_state.df_base = carregar_dados_locais(sheet_url)
+
+    if 'df_atual' not in st.session_state:
+        st.session_state.df_atual = recalcular_totais(st.session_state.df_base.copy())
+
+    if 'mensagem_acao' in st.session_state:
+        st.success(st.session_state.mensagem_acao)
+        del st.session_state.mensagem_acao
+
+    df = st.session_state.df_atual
 
     # --- CÁLCULOS GERAIS ---
     qtd_selecoes = len(df)
@@ -36,7 +119,7 @@ try:
     percentual_conclusao = (total_obtidas / total_figurinhas_possiveis) * 100
 
     # --- CRIAÇÃO DAS ABAS ---
-    tab1, tab2 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes"])
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes", "➕ Registrar Aquisição"])
 
     # ==========================================
     # ABA 1: DASHBOARD GERAL (GRÁFICOS)
@@ -158,6 +241,83 @@ try:
                     st.info(f"**{selecao}** ({len(figurinhas_faltantes)} faltantes):  \n{', '.join(figurinhas_faltantes)}")
                 else:
                     st.success(f"**{selecao}**: 🎉 100% completa!")
+
+    # ==========================================
+    # ABA 3: REGISTRAR AQUISIÇÃO
+    # ==========================================
+    with tab3:
+        st.header("➕ Registrar Aquisição de Figurinhas")
+        st.markdown("Escolha o país, selecione o número que estava faltando e atualize a tabela em tempo real.")
+        st.info("As alterações são salvas localmente em um banco SQLite dentro do projeto.")
+
+        with st.form("form_aquisicao", clear_on_submit=True):
+            selecao_aquisicao = st.selectbox("Escolha o País / Seleção:", sorted(df['SELECOES'].unique()))
+            df_selecao_aquisicao = df[df['SELECOES'] == selecao_aquisicao].iloc[0]
+
+            numeros_faltantes = [
+                str(i)
+                for i in range(1, 21)
+                if str(i) in df.columns and df_selecao_aquisicao[str(i)] == 0
+            ]
+
+            numero_aquisicao = st.selectbox(
+                "Escolha o número adquirido:",
+                numeros_faltantes if numeros_faltantes else ["Nenhum número faltante"],
+                disabled=not numeros_faltantes,
+            )
+
+            registrar = st.form_submit_button("Registrar aquisição")
+
+        if registrar:
+            if not numeros_faltantes:
+                st.warning(f"A seleção **{selecao_aquisicao}** já está completa.")
+            else:
+                idx_selecao = df.index[df['SELECOES'] == selecao_aquisicao][0]
+                linha_planilha = idx_selecao + 2
+
+                if df.loc[idx_selecao, numero_aquisicao] == 1:
+                    st.info(f"O número **{numero_aquisicao}** já estava registrado como adquirido para **{selecao_aquisicao}**.")
+                else:
+                    df_atualizado = st.session_state.df_atual.copy()
+                    df_atualizado.loc[idx_selecao, numero_aquisicao] = 1
+                    df_atualizado = recalcular_totais(df_atualizado)
+                    registrar_aquisicao_no_historico(selecao_aquisicao, numero_aquisicao)
+                    salvar_dados_locais(df_atualizado)
+                    st.session_state.df_atual = df_atualizado
+                    st.session_state.mensagem_acao = f"Aquisição registrada com sucesso: **{selecao_aquisicao}** - número **{numero_aquisicao}**."
+                    st.rerun()
+
+        st.divider()
+        st.subheader("Tabela atualizada")
+        colunas_tabela = ['SELECOES', 'GRUPO', 'TOTAL', 'FALTANTE'] + [str(i) for i in range(1, 21) if str(i) in df.columns]
+        df_tabela = df[colunas_tabela].copy()
+
+        def colorir_valor(valor):
+            if valor == 0:
+                return 'background-color: #ffcccc; color: #8b0000; font-weight: bold;'
+            if valor == 1:
+                return 'background-color: #ccffcc; color: #006400; font-weight: bold;'
+            return ''
+
+        colunas_figurinhas = [str(i) for i in range(1, 21) if str(i) in df_tabela.columns]
+        df_estilizado = df_tabela.style.applymap(colorir_valor, subset=colunas_figurinhas)
+        st.dataframe(df_estilizado, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("Exportar histórico")
+        historico_aquisicoes = carregar_historico_aquisicoes()
+
+        if historico_aquisicoes.empty:
+            st.caption("Nenhuma aquisição registrada ainda.")
+        else:
+            csv_historico = historico_aquisicoes.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Baixar CSV com País e Número",
+                data=csv_historico,
+                file_name="historico_aquisicoes.csv",
+                mime="text/csv",
+            )
+            st.dataframe(historico_aquisicoes, use_container_width=True, hide_index=True)
 
 except Exception as e:
     st.error(f"Erro ao carregar os dados. Verifique se o link hardcoded no código está correto e se a planilha do Sheets é pública. Detalhe do erro: {e}")
