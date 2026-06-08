@@ -40,27 +40,64 @@ def recalcular_totais(df_local):
     return df_local
 
 
+def aplicar_aquisicoes_no_dataframe(df_local):
+    banco_path = get_banco_path()
+    if not banco_path.exists():
+        return df_local
+
+    with sqlite3.connect(banco_path) as conexao:
+        try:
+            historico = pd.read_sql_query(
+                "SELECT DATA_HORA, SELECAO, NUMERO FROM aquisicoes ORDER BY DATA_HORA ASC",
+                conexao,
+            )
+        except Exception:
+            return df_local
+
+    if historico.empty:
+        return df_local
+
+    for _, registro in historico.iterrows():
+        selecao = str(registro["SELECAO"]).strip()
+        numero = str(registro["NUMERO"]).strip()
+
+        if numero not in df_local.columns:
+            continue
+
+        mascara = df_local["SELECOES"].astype(str).str.strip() == selecao
+        if mascara.any():
+            df_local.loc[mascara, numero] = 1
+
+    return recalcular_totais(df_local)
+
+
 def get_banco_path():
     return Path(__file__).with_name("dados.sqlite")
 
 
 def carregar_dados_locais(sheet_url):
     banco_path = get_banco_path()
+    banco_ja_existia = banco_path.exists()
 
-    if banco_path.exists():
-        with sqlite3.connect(banco_path) as conexao:
-            df_local = pd.read_sql_query("SELECT * FROM selecoes", conexao)
-    else:
+    try:
         df_local = carregar_dados(sheet_url)
         df_local = recalcular_totais(df_local)
+
         with sqlite3.connect(banco_path) as conexao:
             df_local.to_sql("selecoes", conexao, if_exists="replace", index=False)
-            pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"]).to_sql(
-                "aquisicoes", conexao, if_exists="replace", index=False
-            )
+            if not banco_ja_existia:
+                pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"]).to_sql(
+                    "aquisicoes", conexao, if_exists="replace", index=False
+                )
+    except Exception:
+        if not banco_ja_existia:
+            raise
+
+        with sqlite3.connect(banco_path) as conexao:
+            df_local = pd.read_sql_query("SELECT * FROM selecoes", conexao)
 
     df_local = df_local.fillna(0)
-    return recalcular_totais(df_local)
+    return aplicar_aquisicoes_no_dataframe(df_local)
 
 
 def salvar_dados_locais(df_local):
@@ -95,14 +132,22 @@ def carregar_historico_aquisicoes():
             return pd.DataFrame(columns=["DATA_HORA", "SELECAO", "NUMERO"])
 
 
+def limpar_cache_aquisicoes():
+    banco_path = get_banco_path()
+    if not banco_path.exists():
+        return
+
+    with sqlite3.connect(banco_path) as conexao:
+        conexao.execute("DELETE FROM aquisicoes")
+        conexao.commit()
+
+
 sheet_url = "https://docs.google.com/spreadsheets/d/1RKQgjvb2QImzO8cAhVtARSKNdJrdH22b1KNqqiqFAZw/edit?usp=sharing"
 
 try:
-    if 'df_base' not in st.session_state:
-        st.session_state.df_base = carregar_dados_locais(sheet_url)
-
-    if 'df_atual' not in st.session_state:
-        st.session_state.df_atual = recalcular_totais(st.session_state.df_base.copy())
+    st.session_state.df_base = carregar_dados_locais(sheet_url)
+    st.session_state.df_atual = recalcular_totais(st.session_state.df_base.copy())
+    st.session_state.historico_aquisicoes = carregar_historico_aquisicoes()
 
     if 'mensagem_acao' in st.session_state:
         st.success(st.session_state.mensagem_acao)
@@ -250,23 +295,31 @@ try:
         st.markdown("Escolha o país, selecione o número que estava faltando e atualize a tabela em tempo real.")
         st.info("As alterações são salvas localmente em um banco SQLite dentro do projeto.")
 
-        with st.form("form_aquisicao", clear_on_submit=True):
-            selecao_aquisicao = st.selectbox("Escolha o País / Seleção:", sorted(df['SELECOES'].unique()))
-            df_selecao_aquisicao = df[df['SELECOES'] == selecao_aquisicao].iloc[0]
+        confirmar_limpeza = st.checkbox("Confirmo que quero limpar o cache local de aquisições")
 
-            numeros_faltantes = [
-                str(i)
-                for i in range(1, 21)
-                if str(i) in df.columns and df_selecao_aquisicao[str(i)] == 0
-            ]
+        if st.button("Limpar cache local de aquisições", disabled=not confirmar_limpeza):
+            limpar_cache_aquisicoes()
+            st.session_state.pop("historico_aquisicoes", None)
+            st.session_state.pop("mensagem_acao", None)
+            st.rerun()
 
-            numero_aquisicao = st.selectbox(
-                "Escolha o número adquirido:",
-                numeros_faltantes if numeros_faltantes else ["Nenhum número faltante"],
-                disabled=not numeros_faltantes,
-            )
+        selecao_aquisicao = st.selectbox("Escolha o País / Seleção:", sorted(df['SELECOES'].unique()), key="selecao_aquisicao")
+        df_selecao_aquisicao = df[df['SELECOES'] == selecao_aquisicao].iloc[0]
 
-            registrar = st.form_submit_button("Registrar aquisição")
+        numeros_faltantes = [
+            str(i)
+            for i in range(1, 21)
+            if str(i) in df.columns and df_selecao_aquisicao[str(i)] == 0
+        ]
+
+        numero_aquisicao = st.selectbox(
+            "Escolha o número adquirido:",
+            numeros_faltantes if numeros_faltantes else ["Nenhum número faltante"],
+            disabled=not numeros_faltantes,
+            key=f"numero_aquisicao_{selecao_aquisicao}",
+        )
+
+        registrar = st.button("Registrar aquisição")
 
         if registrar:
             if not numeros_faltantes:
@@ -283,7 +336,23 @@ try:
                     df_atualizado = recalcular_totais(df_atualizado)
                     registrar_aquisicao_no_historico(selecao_aquisicao, numero_aquisicao)
                     salvar_dados_locais(df_atualizado)
+                    st.session_state.df_base = df_atualizado.copy()
                     st.session_state.df_atual = df_atualizado
+                    novo_registro = pd.DataFrame([
+                        {
+                            "DATA_HORA": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "SELECAO": selecao_aquisicao,
+                            "NUMERO": numero_aquisicao,
+                        }
+                    ])
+                    historico_atual = st.session_state.get("historico_aquisicoes")
+                    if historico_atual is None or historico_atual.empty:
+                        st.session_state.historico_aquisicoes = novo_registro
+                    else:
+                        st.session_state.historico_aquisicoes = pd.concat(
+                            [novo_registro, historico_atual],
+                            ignore_index=True,
+                        )
                     st.session_state.mensagem_acao = f"Aquisição registrada com sucesso: **{selecao_aquisicao}** - número **{numero_aquisicao}**."
                     st.rerun()
 
@@ -300,16 +369,22 @@ try:
             return ''
 
         colunas_figurinhas = [str(i) for i in range(1, 21) if str(i) in df_tabela.columns]
-        styler = df_tabela.style
-        if hasattr(styler, "map"):
-            df_estilizado = styler.map(colorir_valor, subset=colunas_figurinhas)
-        else:
-            df_estilizado = styler.applymap(colorir_valor, subset=colunas_figurinhas)
+        try:
+            styler = df_tabela.style
+            if hasattr(styler, "map"):
+                df_estilizado = styler.map(colorir_valor, subset=colunas_figurinhas)
+            else:
+                df_estilizado = styler.applymap(colorir_valor, subset=colunas_figurinhas)
+        except Exception:
+            df_estilizado = df_tabela
         st.dataframe(df_estilizado, use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("Exportar histórico")
-        historico_aquisicoes = carregar_historico_aquisicoes()
+        historico_aquisicoes = st.session_state.get("historico_aquisicoes")
+        if historico_aquisicoes is None:
+            historico_aquisicoes = carregar_historico_aquisicoes()
+            st.session_state.historico_aquisicoes = historico_aquisicoes
 
         if historico_aquisicoes.empty:
             st.caption("Nenhuma aquisição registrada ainda.")
