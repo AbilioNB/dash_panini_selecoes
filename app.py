@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import sqlite3
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -26,6 +27,8 @@ def carregar_dados(sheet_url):
     df_local = df_local.dropna(subset=['SELECOES'])
     df_local['SELECOES'] = df_local['SELECOES'].astype(str).str.strip()
     df_local['GRUPO'] = df_local['GRUPO'].astype(str).str.strip()
+    if 'SIGLA' in df_local.columns:
+        df_local['SIGLA'] = df_local['SIGLA'].astype(str).str.strip().str.upper()
 
     return df_local
 
@@ -164,7 +167,7 @@ try:
     percentual_conclusao = (total_obtidas / total_figurinhas_possiveis) * 100
 
     # --- CRIAÇÃO DAS ABAS ---
-    tab1, tab2, tab3 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes", "➕ Registrar Aquisição"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes", "🔎 Pesquisa por Sigla", "➕ Registrar Aquisição"])
 
     # ==========================================
     # ABA 1: DASHBOARD GERAL (GRÁFICOS)
@@ -288,9 +291,57 @@ try:
                     st.success(f"**{selecao}**: 🎉 100% completa!")
 
     # ==========================================
-    # ABA 3: REGISTRAR AQUISIÇÃO
+    # ABA 3: PESQUISA POR SIGLA
     # ==========================================
     with tab3:
+        st.header("🔎 Consulta por Sigla")
+        st.markdown("Digite a sigla e o número da figurinha, por exemplo: CZE2.")
+
+        with st.form("form_pesquisa_sigla"):
+            sigla_digitada = st.text_input("Digite a sigla:", placeholder="Ex.: CZE2").strip().upper()
+            pesquisar_sigla = st.form_submit_button("Pesquisar sigla")
+
+        if pesquisar_sigla:
+            if 'SIGLA' not in df.columns:
+                st.error("A coluna SIGLA não está disponível na base carregada.")
+            elif not sigla_digitada:
+                st.warning("Digite uma sigla para pesquisar.")
+            else:
+                correspondencia = re.match(r"^([A-ZÀ-ÿ]+)(\d+)?$", sigla_digitada)
+
+                if not correspondencia:
+                    st.error("Use o formato SIGLA+NÚMERO, por exemplo CZE2.")
+                else:
+                    sigla_base = correspondencia.group(1)
+                    numero_figurinhas = correspondencia.group(2)
+
+                    siglas_base = df['SIGLA'].astype(str).str.strip().str.upper()
+                    resultado_sigla = df[siglas_base == sigla_base]
+
+                    if resultado_sigla.empty:
+                        st.error("Não obitida")
+                    else:
+                        linha = resultado_sigla.iloc[0]
+
+                        if not numero_figurinhas:
+                            st.caption(f"Encontrada na seleção: {linha['SELECOES']} | SIGLA: {linha['SIGLA']}")
+                            st.success("Já obitida")
+                        else:
+                            coluna_figura = numero_figurinhas
+
+                            if coluna_figura not in df.columns:
+                                st.error("Não obitida")
+                            elif int(linha[coluna_figura]) == 1:
+                                st.caption(f"Encontrada na seleção: {linha['SELECOES']} | SIGLA: {linha['SIGLA']}")
+                                st.success("Já obitida")
+                            else:
+                                st.caption(f"Encontrada na seleção: {linha['SELECOES']} | SIGLA: {linha['SIGLA']}")
+                                st.error("Não obitida")
+
+    # ==========================================
+    # ABA 4: REGISTRAR AQUISIÇÃO
+    # ==========================================
+    with tab4:
         st.header("➕ Registrar Aquisição de Figurinhas")
         st.markdown("Escolha o país, selecione o número que estava faltando e atualize a tabela em tempo real.")
         st.info("As alterações são salvas localmente em um banco SQLite dentro do projeto.")
