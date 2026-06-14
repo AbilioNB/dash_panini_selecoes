@@ -43,6 +43,15 @@ def recalcular_totais(df_local):
     return df_local
 
 
+def obter_figurinhas_faltantes(linha, df_referencia):
+    figurinhas_faltantes = []
+    for i in range(1, 21):
+        col_name = str(i)
+        if col_name in df_referencia.columns and linha[col_name] == 0:
+            figurinhas_faltantes.append(col_name)
+    return figurinhas_faltantes
+
+
 def aplicar_aquisicoes_no_dataframe(df_local):
     banco_path = get_banco_path()
     if not banco_path.exists():
@@ -167,7 +176,7 @@ try:
     percentual_conclusao = (total_obtidas / total_figurinhas_possiveis) * 100
 
     # --- CRIAÇÃO DAS ABAS ---
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes", "🔎 Pesquisa por Sigla", "➕ Registrar Aquisição"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard Geral", "🔍 Pesquisa de Faltantes", "🔎 Pesquisa por Sigla", "➕ Registrar Aquisição", "📋 Faltantes por Grupo"])
 
     # ==========================================
     # ABA 1: DASHBOARD GERAL (GRÁFICOS)
@@ -278,17 +287,44 @@ try:
             # Itera sobre todas as seleções do grupo para listar uma abaixo da outra
             for index, row in df_grupo_filtrado.iterrows():
                 selecao = row['SELECOES']
-                figurinhas_faltantes = []
-                for i in range(1, 21):
-                    col_name = str(i)
-                    if col_name in df.columns and row[col_name] == 0:
-                        figurinhas_faltantes.append(col_name)
+                figurinhas_faltantes = obter_figurinhas_faltantes(row, df)
                 
                 # Renderiza os blocos de aviso dependendo do status de cada seleção
                 if len(figurinhas_faltantes) > 0:
                     st.info(f"**{selecao}** ({len(figurinhas_faltantes)} faltantes):  \n{', '.join(figurinhas_faltantes)}")
                 else:
                     st.success(f"**{selecao}**: 🎉 100% completa!")
+
+    # ==========================================
+    # ABA 5: FALTANTES POR GRUPO
+    # ==========================================
+    with tab5:
+        st.header("📋 Faltantes por Grupo")
+        st.markdown("Visão consolidada de todas as seleções, organizada por grupo e ordenada alfabeticamente.")
+
+        grupos_ordenados = sorted(df['GRUPO'].dropna().unique())
+
+        for grupo in grupos_ordenados:
+            df_grupo = df[df['GRUPO'] == grupo].copy().sort_values(by='SELECOES')
+            with st.expander(f"Grupo {grupo} - {len(df_grupo)} seleções", expanded=True):
+                linhas_resumo = []
+
+                for _, row in df_grupo.iterrows():
+                    figurinhas_faltantes = obter_figurinhas_faltantes(row, df)
+                    if not figurinhas_faltantes:
+                        continue
+                    linhas_resumo.append({
+                        "SELECAO": row['SELECOES'],
+                        "QTD_FALTANTES": len(figurinhas_faltantes),
+                        "FALTANTES": ", ".join(figurinhas_faltantes),
+                    })
+
+                if not linhas_resumo:
+                    st.caption("Nenhuma seleção com faltantes neste grupo.")
+                    continue
+
+                df_resumo = pd.DataFrame(linhas_resumo).sort_values(by=['QTD_FALTANTES', 'SELECAO'], ascending=[False, True])
+                st.dataframe(df_resumo, use_container_width=True, hide_index=True)
 
     # ==========================================
     # ABA 3: PESQUISA POR SIGLA
